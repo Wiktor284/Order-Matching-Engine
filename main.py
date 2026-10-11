@@ -16,7 +16,7 @@ class Order:
     side: Side
     order_type: OrderType
     quantity: int  #liczba akcji do kupienia
-    price: int    # cena po jakiej chcemy kupic/sprzedac akcje
+    price: int    #cena po jakiej chcemy kupic/sprzedac akcje
     timestamp: float = None #czas przyjecia zlecenia
 
     def __post_init__(self):  #ustawia aktualny timestamp
@@ -35,15 +35,3 @@ class Order:
         return (f"[{self.side.value}] ID:{self.order_id} | "
             f"Ilość: {self.quantity} | Cena: {price_str}")
 
-if __name__ == "__main__":
-    # przykładowe uzycie klasy Order
-    o1 = Order(order_id=1, side=Side.BUY, order_type=OrderType.LIMIT, quantity=100, price=5000)
-    print("Stworzono:", o1)
-    
-    o2 = Order(order_id=2, side=Side.SELL, order_type=OrderType.MARKET, quantity=50, price=None)
-    print("Stworzono:", o2)
-
-    try: 
-        o_bad = Order(order_id=3, side=Side.BUY, order_type=OrderType.LIMIT, quantity=-10, price=-50)
-    except ValueError as e:
-        print("Wylapano oczekiwany blad walidacji :" , e)
