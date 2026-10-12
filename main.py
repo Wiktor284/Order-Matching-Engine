@@ -35,3 +35,19 @@ class Order:
         return (f"[{self.side.value}] ID:{self.order_id} | "
             f"Ilość: {self.quantity} | Cena: {price_str}")
 
+@dataclass
+class Trade:
+    buy_order_id: int
+    sell_order_id: int
+    quantity: int
+    price: int
+    timestamp: float = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = time.time_ns()
+
+    def __repr__(self):
+        return (f"Trade | Buy Order ID: {self.buy_order_id} | "
+                f"Sell Order ID: {self.sell_order_id} | "
+                f"Quantity: {self.quantity} | Price: {self.price/100:.2f} PLN")
