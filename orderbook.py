@@ -1,139 +1,205 @@
-from pricelevel import PriceLevel
+from collections import deque
 from main import Side, OrderType, Order, Trade
 
 class OrderBook:
     def __init__(self):
-        # klucz: cena (int), wartość: obiekt PriceLevel
-        self.bids: dict[int, PriceLevel] = {}  # Zlecenia kupna
-        self.asks: dict[int, PriceLevel] = {}  # Zlecenia sprzedaży
-        self.trades: list[Trade] = []          # Historia zrealizowanych transakcji
+        self.bids = {}
+        self.asks = {}
+        self.trades = []
+        self.orders_map = {}
 
-    def get_best_bid(self) -> int | None:
-        """zwraca najwyższą cenę kupna w księdze"""
-        return max(self.bids.keys()) if self.bids else None
+    def get_best_bid(self) -> int:
+        if not self.bids:
+            return None
+        return max(self.bids.keys())
 
-    def get_best_ask(self) -> int | None:
-        """zwraca najniższą cenę sprzedaży w księdze"""
-        return min(self.asks.keys()) if self.asks else None
+    def get_best_ask(self) -> int:
+        if not self.asks:
+            return None
+        return min(self.asks.keys())
 
     def process_order(self, incoming_order: Order) -> list[Trade]:
-        """
-        1. dopasowuje przychodzące zlecenie z przeciwległą stroną księgi
-        2. generuje obiekty Trade
-        3. dodaje niewypełnioną resztę zlecenia LIMIT do księgi
-        """
-        generated_trades: list[Trade] = []
+        """Główna bramka wjazdowa: dopasowuje zlecenie lub wpisuje resztki do księgi."""
+        generated_trades = []
 
         if incoming_order.side == Side.BUY:
-            generated_trades.extend(self._match_buy_order(incoming_order))
+            generated_trades = self._match_buy(incoming_order)
         else:
-            generated_trades.extend(self._match_sell_order(incoming_order))
+            generated_trades = self._match_sell(incoming_order)
 
-        # jeśli zlecenie LIMIT nie zostało w pełni zrealizowane, dodaj resztę do księgi
+        #jesli po dopasowaniu zostal niezrealizowany wolumen i jest to LIMIT wpisujemy do księgi
         if incoming_order.quantity > 0 and incoming_order.order_type == OrderType.LIMIT:
             self._add_to_book(incoming_order)
 
         self.trades.extend(generated_trades)
         return generated_trades
 
-    def _match_buy_order(self, buy_order: Order) -> list[Trade]:
+    def cancel_order(self, order_id: int) -> bool:
+        """Anuluje zlecenie w czasie O(1) na podstawie jego ID."""
+        if order_id not in self.orders_map:
+            print(f"Nie można anulować: Zlecenie ID:{order_id} nie istnieje lub zostało zrealizowane.")
+            return False
+
+        #pobieramy zlecenie ze slownika indeksującego
+        order = self.orders_map.pop(order_id)
+        target_book = self.bids if order.side == Side.BUY else self.asks
+
+        #usuwamy zlecenie z kolejki na danej cenie
+        if order.price in target_book:
+            queue = target_book[order.price]
+            queue.remove(order)
+            
+            #jesli kolejka na tej cenie jest pusta czyszczymy poziom cenowy
+            if not queue:
+                del target_book[order.price]
+
+        print(f"ANULOWANO zlecenie ID:{order_id}")
+        return True
+
+    def amend_order(self, order_id: int, new_quantity: int = None, new_price: int = None) -> bool:
+        """Edytuje istniejace zlecenie z zachowaniem zasad priorytetu FIFO."""
+        if order_id not in self.orders_map:
+            print(f"Nie można edytować: Zlecenie ID:{order_id} nie istnieje.")
+            return False
+
+        order = self.orders_map[order_id]
+    
+        #przypadek 1: zmiana ceny lub zwiekszenie ilosci
+        if (new_price and new_price != order.price) or (new_quantity and new_quantity > order.quantity):
+            print(f"EDYCJA ID:{order_id} (Zmiana ceny/zwiększenie wolumenu) -> Przeniesienie na koniec kolejki!")
+            self.cancel_order(order_id)
+            
+            updated_order = Order(
+                order_id=order_id,
+                side=order.side,
+                order_type=order.order_type,
+                quantity=new_quantity if new_quantity else order.quantity,
+                price=new_price if new_price else order.price
+            )
+            self.process_order(updated_order)
+            return True
+
+        #przypadek 2: zmniejszenie ilosci
+        if new_quantity and new_quantity < order.quantity:
+            print(f"EDYCJA ID:{order_id} (Zmniejszenie wolumenu z {order.quantity} na {new_quantity}) -> Zachowano pozycję w kolejce.")
+            order.quantity = new_quantity
+            return True
+
+        return False
+
+    def _match_buy(self, buy_order: Order) -> list[Trade]:
         trades = []
 
         while buy_order.quantity > 0 and self.asks:
-            best_ask_price = self.get_best_ask()
+            best_ask = self.get_best_ask()
 
-            # dla zlecenia LIMIT: cena sprzedającego nie może być wyższa niż nasza maksymalna cena
-            if buy_order.order_type == OrderType.LIMIT and buy_order.price < best_ask_price:
+            if buy_order.order_type == OrderType.LIMIT and buy_order.price < best_ask:
                 break
 
-            level = self.asks[best_ask_price]
-            resting_sell_order = level.get_first_order()
+            ask_queue = self.asks[best_ask]
 
-            # wolumen transakcji to minimum z dostępnego i żądanego
-            match_qty = min(buy_order.quantity, resting_sell_order.quantity)
+            while ask_queue and buy_order.quantity > 0:
+                passive_sell = ask_queue[0]
+                traded_qty = min(buy_order.quantity, passive_sell.quantity)
 
-            # cena transakcji zależy od zlecenia pasywnego w księdze
-            trade = Trade(
-                buy_order_id=buy_order.order_id,
-                sell_order_id=resting_sell_order.order_id,
-                quantity=match_qty,
-                price=best_ask_price
-            )
-            trades.append(trade)
+                trade = Trade(
+                    buy_order_id=buy_order.order_id,
+                    sell_order_id=passive_sell.order_id,
+                    price=best_ask,
+                    quantity=traded_qty
+                )
+                trades.append(trade)
 
-            # pomniejszamy wolumeny
-            buy_order.quantity -= match_qty
-            resting_sell_order.quantity -= match_qty
-            level.total_quantity -= match_qty
+                buy_order.quantity -= traded_qty
+                passive_sell.quantity -= traded_qty
 
-            # usuwamy zrealizowane zlecenie z czoła kolejki
-            if resting_sell_order.quantity == 0:
-                level.remove_first_order()
+                #jesli pasywne zlecenie zostalo zrealizowane w calosci usuwamy je
+                if passive_sell.quantity == 0:
+                    ask_queue.popleft()
+                    self.orders_map.pop(passive_sell.order_id, None)
 
-            # usuwamy pusty poziom cenowy
-            if len(level) == 0:
-                del self.asks[best_ask_price]
+            if not ask_queue:
+                del self.asks[best_ask]
 
         return trades
 
-    def _match_sell_order(self, sell_order: Order) -> list[Trade]:
+    def _match_sell(self, sell_order: Order) -> list[Trade]:
         trades = []
 
         while sell_order.quantity > 0 and self.bids:
-            best_bid_price = self.get_best_bid()
+            best_bid = self.get_best_bid()
 
-            # dla zlecenia LIMIT: cena kupującego nie może być niższa niż nasza minimalna cena
-            if sell_order.order_type == OrderType.LIMIT and sell_order.price > best_bid_price:
+            if sell_order.order_type == OrderType.LIMIT and sell_order.price > best_bid:
                 break
 
-            level = self.bids[best_bid_price]
-            resting_buy_order = level.get_first_order()
+            bid_queue = self.bids[best_bid]
 
-            match_qty = min(sell_order.quantity, resting_buy_order.quantity)
+            while bid_queue and sell_order.quantity > 0:
+                passive_buy = bid_queue[0]
+                traded_qty = min(sell_order.quantity, passive_buy.quantity)
 
-            trade = Trade(
-                buy_order_id=resting_buy_order.order_id,
-                sell_order_id=sell_order.order_id,
-                quantity=match_qty,
-                price=best_bid_price
-            )
-            trades.append(trade)
+                trade = Trade(
+                    buy_order_id=passive_buy.order_id,
+                    sell_order_id=sell_order.order_id,
+                    price=best_bid,
+                    quantity=traded_qty
+                )
+                trades.append(trade)
 
-            sell_order.quantity -= match_qty
-            resting_buy_order.quantity -= match_qty
-            level.total_quantity -= match_qty
+                sell_order.quantity -= traded_qty
+                passive_buy.quantity -= traded_qty
 
-            if resting_buy_order.quantity == 0:
-                level.remove_first_order()
+                if passive_buy.quantity == 0:
+                    bid_queue.popleft()
+                    self.orders_map.pop(passive_buy.order_id, None)
 
-            if len(level) == 0:
-                del self.bids[best_bid_price]
+            if not bid_queue:
+                del self.bids[best_bid]
 
         return trades
 
-    def _add_to_book(self, order: Order) -> None:
-        """Pomocnicza funkcja dodająca zlecenie do księgi."""
+    def _add_to_book(self, order: Order):
+        """Zapisuje zlecenie do księgi oraz rejestruje je w słowniku orders_map."""
         target_book = self.bids if order.side == Side.BUY else self.asks
-
-        # sprawdzamy order.price zamiast order.side
         if order.price not in target_book:
-            target_book[order.price] = PriceLevel(order.price)
-
-        target_book[order.price].add_order(order)
-
-    def __repr__(self) -> str:
-        res = ["\n=== Order Book ==="]
-        res.append("=== Asks (Sprzedaż) ===")
-        for price in sorted(self.asks.keys(), reverse=True):
-            level = self.asks[price]
+            target_book[order.price] = deque()
             
-            res.append(f" {price / 100:.2f} PLN | Wolumen: {level.total_quantity} (Zleceń: {len(level)})")
+        target_book[order.price].append(order)
+        self.orders_map[order.order_id] = order  #rejestracja dla szybkiego O(1) lookupu
+
+    def __repr__(self):
+        res = ["\n=== ORDER BOOK ==="]
+        res.append("--- ASKS (Sprzedaż - rosnąco) ---")
+        for price in sorted(self.asks.keys(), reverse=True):
+            total_qty = sum(o.quantity for o in self.asks[price])
+            res.append(f"  {price / 100:.2f} PLN | Wolumen: {total_qty} (Liczba zleceń: {len(self.asks[price])})")
 
         res.append("------------------------")
         for price in sorted(self.bids.keys(), reverse=True):
-            level = self.bids[price]
-            
-            res.append(f" {price / 100:.2f} PLN | Wolumen: {level.total_quantity} (Zleceń: {len(level)})")
+            total_qty = sum(o.quantity for o in self.bids[price])
+            res.append(f"  {price / 100:.2f} PLN | Wolumen: {total_qty} (Liczba zleceń: {len(self.bids[price])})")
 
-        res.append("=== Bids (Kupno) ===")
+        res.append("--- BIDS (Kupno - malejąco) ---")
         return "\n".join(res)
+
+
+#TEST
+if __name__ == "__main__":
+    book = OrderBook()
+
+    print("--- 1. Dodajemy zlecenia do Księgi ---")
+    book.process_order(Order(1, Side.SELL, OrderType.LIMIT, quantity=50, price=10000)) # ID:1 Sell 50szt po 100 zł
+    book.process_order(Order(2, Side.BUY, OrderType.LIMIT, quantity=30, price=9500))   # ID:2 Buy 30szt po 95 zł
+    book.process_order(Order(3, Side.BUY, OrderType.LIMIT, quantity=20, price=9500))   # ID:3 Buy 20szt po 95 zł
+    print(book)
+
+    print("\n--- 2. TEST: Zmniejszenie ilości w ID:2 (Zachowuje pozycję FIFO) ---")
+    book.amend_order(order_id=2, new_quantity=10)
+    print(book)
+
+    print("\n--- 3. TEST: Anulowanie zlecenia ID:1 ---")
+    book.cancel_order(order_id=1)
+    print(book)
+
+    print("\n--- 4. TEST: Próba ponownego anulowania ID:1 (powinna zostać odrzucona) ---")
+    book.cancel_order(order_id=1)
